@@ -55,10 +55,12 @@ process.on('unhandledRejection', (err, promise) => {
 });
 
 // backend/server.js
-app.use(cors({
-  origin: 'http://localhost:3000', // Your frontend URL
-  credentials: true
-}));
+app.use(
+  cors({
+    origin: 'https://autopay-ho4k.vercel.app', // 👈 Replace with your Vercel URL
+    credentials: true,
+  })
+);
 
 // backend/server.js (add this)
 const employeeRoutes = require('./routes/employeeRoutes');
