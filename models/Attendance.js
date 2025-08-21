@@ -1,4 +1,4 @@
-// backend/models/Attendance.js
+// backend/models/Attendance.js (updated)
 const mongoose = require('mongoose');
 
 const AttendanceSchema = new mongoose.Schema({
@@ -34,7 +34,8 @@ const AttendanceSchema = new mongoose.Schema({
       enum: ['Point']
     },
     coordinates: {
-      type: [Number] // [longitude, latitude]
+      type: [Number], // [longitude, latitude]
+      index: '2dsphere'
     }
   },
   qrData: {

@@ -1,4 +1,6 @@
+// backend/models/Shift.js (updated)
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 
 const ShiftSchema = new mongoose.Schema({
   employeeId: {
@@ -28,7 +30,7 @@ const ShiftSchema = new mongoose.Schema({
     enum: ['scheduled', 'in-progress', 'completed', 'missed'],
     default: 'scheduled'
   },
-  qrCode: {
+  qrToken: {
     type: String
   },
   qrExpiry: {
@@ -40,41 +42,29 @@ const ShiftSchema = new mongoose.Schema({
   checkOutTime: {
     type: Date
   },
-  // Location data for the shift
-  location: {
-    type: {
-      type: String,
-      enum: ['Point'],
-      required: true
-    },
-    coordinates: {
-      type: [Number], // [longitude, latitude]
-      index: '2dsphere',
-      required: true
-    },
-    name: {
-      type: String,
-      required: true
-    },
-    radius: {
-      type: Number, // in meters
-      default: 100
-    }
-  },
-  // Actual check-in location
   checkInLocation: {
     type: {
       type: String,
       enum: ['Point']
     },
     coordinates: {
-      type: [Number] // [longitude, latitude]
+      type: [Number], // [longitude, latitude]
+      index: '2dsphere'
     }
   },
   createdAt: {
     type: Date,
     default: Date.now
   }
+});
+
+// Generate QR token before saving
+ShiftSchema.pre('save', function(next) {
+  if (!this.qrToken) {
+    this.qrToken = crypto.randomBytes(32).toString('hex');
+    this.qrExpiry = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes expiry
+  }
+  next();
 });
 
 module.exports = mongoose.model('Shift', ShiftSchema);

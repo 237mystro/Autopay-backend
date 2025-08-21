@@ -1,25 +1,23 @@
-// backend/routes/attendanceRoutes.js
+// backend/routes/attendanceRoutes.js (updated)
 const express = require('express');
 const {
   checkIn,
-  checkOut,
-  getAttendanceByDate,
-  getAttendanceSummary
+  getAttendance,
+  getAdminAttendanceDashboard
 } = require('../controllers/attendanceController');
 const { protect, authorize } = require('../middleware/auth');
 
 const router = express.Router();
 
+// Employee routes
 router.route('/checkin')
-  .post(protect, checkIn);
-
-router.route('/checkout')
-  .post(protect, checkOut);
+  .post(protect, authorize('employee'), checkIn);
 
 router.route('/')
-  .get(protect, authorize('admin', 'hr'), getAttendanceByDate);
+  .get(protect, authorize('employee'), getAttendance);
 
-router.route('/summary')
-  .get(protect, authorize('admin', 'hr'), getAttendanceSummary);
+// Admin routes
+router.route('/admin-dashboard')
+  .get(protect, authorize('admin', 'hr'), getAdminAttendanceDashboard);
 
 module.exports = router;
