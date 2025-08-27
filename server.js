@@ -15,6 +15,8 @@ connectDB();
 
 // Route files
 const authRoutes = require('./routes/authRoutes');
+const settingsRoutes = require('./routes/settingsRoutes');
+
 
 const app = express();
 
@@ -34,6 +36,7 @@ if (process.env.NODE_ENV === 'development') {
 
 // Mount routers
 app.use('/api/v1/auth', authRoutes);
+app.use('/api/v1/settings', settingsRoutes);
 
 // Error handler
 app.use(errorHandler);
