@@ -1,9 +1,11 @@
-// backend/controllers/employeeController.js (corrected & cleaned)
+// backend/controllers/employeeController.js
 const User = require('../models/User');
 const Employee = require('../models/Employee');
 const Shift = require('../models/Shift');
-const crypto = require('crypto');
+const Attendance = require('../models/Attendance');
 const mongoose = require('mongoose');
+const crypto = require('crypto');
+const { verifyLocation, formatDistance } = require('../utils/locationVerification');
 const { sendEmployeeCredentials } = require('../utils/emailService');
 
 // @desc    Get all employees for the admin's company
@@ -259,5 +261,155 @@ exports.deleteEmployee = async (req, res) => {
     session.endSession();
     console.error('Delete employee error:', err);
     res.status(500).json({ success: false, message: 'Server error while deleting employee' });
+  }
+};
+
+
+// @desc    Process employee check-in
+// @route   POST /api/v1/employees/checkin
+// @access  Private (Employee)
+exports.checkIn = async (req, res) => {
+  try {
+    const { qrData, userLocation } = req.body;
+    if (!qrData || !userLocation) {
+      return res.status(400).json({ success: false, message: 'Please provide QR code data and location' });
+    }
+
+    let parsedQRData;
+    try {
+      parsedQRData = JSON.parse(qrData);
+    } catch {
+      return res.status(400).json({ success: false, message: 'Invalid QR code format' });
+    }
+
+    if (!parsedQRData.shiftId || !parsedQRData.token) {
+      return res.status(400).json({ success: false, message: 'Invalid QR code data' });
+    }
+
+    const shift = await Shift.findById(parsedQRData.shiftId).populate('employeeId');
+    if (!shift) return res.status(404).json({ success: false, message: 'Shift not found' });
+
+    if (parsedQRData.token !== shift.qrToken) {
+      return res.status(400).json({ success: false, message: 'Invalid QR code token' });
+    }
+
+    const qrTimestamp = new Date(parsedQRData.timestamp);
+    if (new Date() - qrTimestamp > 5 * 60 * 1000) {
+      return res.status(400).json({ success: false, message: 'QR code has expired' });
+    }
+
+    const employeeUser = await User.findById(shift.employeeId.userId);
+    if (employeeUser.company !== req.user.company) {
+      return res.status(403).json({ success: false, message: 'Not authorized to check in for this shift' });
+    }
+
+    const OFFICE_LOCATION = { latitude: 4.1025, longitude: 9.3908 };
+    const MAX_DISTANCE = 20;
+
+    const distance = verifyLocation(userLocation, OFFICE_LOCATION);
+    if (distance > MAX_DISTANCE) {
+      return res.status(400).json({
+        success: false,
+        message: `You are ${formatDistance(distance)} away from the office. Maximum allowed distance is ${MAX_DISTANCE} meters.`
+      });
+    }
+
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
+
+    let attendance = await Attendance.findOne({
+      employeeId: shift.employeeId._id,
+      date: { $gte: today, $lt: tomorrow }
+    });
+
+    const checkInTime = new Date();
+    const shiftStart = new Date(`${shift.date.split('T')[0]}T${shift.startTime}`);
+    const status = checkInTime > shiftStart ? 'late' : 'present';
+
+    if (attendance) {
+      attendance.checkInTime = checkInTime;
+      attendance.status = status;
+      attendance.location = { type: 'Point', coordinates: [userLocation.longitude, userLocation.latitude] };
+      attendance.qrData = qrData;
+      attendance.updatedAt = Date.now();
+      await attendance.save();
+    } else {
+      attendance = await Attendance.create({
+        employeeId: shift.employeeId._id,
+        shiftId: shift._id,
+        date: today,
+        checkInTime,
+        status,
+        location: { type: 'Point', coordinates: [userLocation.longitude, userLocation.latitude] },
+        qrData
+      });
+    }
+
+    shift.checkInTime = checkInTime;
+    shift.status = 'in-progress';
+    shift.checkInLocation = { type: 'Point', coordinates: [userLocation.longitude, userLocation.latitude] };
+    await shift.save();
+
+    res.status(200).json({ success: true, message: 'Check-in successful', attendance, shift });
+  } catch (err) {
+    console.error('Check-in error:', err);
+    res.status(500).json({ success: false, message: 'Server error during check-in' });
+  }
+};
+
+// @desc    Process employee check-out
+// @route   POST /api/v1/employees/checkout
+// @access  Private (Employee)
+exports.checkOut = async (req, res) => {
+  try {
+    const { shiftId, userLocation } = req.body;
+    if (!shiftId || !userLocation) {
+      return res.status(400).json({ success: false, message: 'Please provide shift ID and location' });
+    }
+
+    const shift = await Shift.findById(shiftId);
+    if (!shift) return res.status(404).json({ success: false, message: 'Shift not found' });
+
+    const employeeUser = await User.findById(shift.employeeId.userId);
+    if (employeeUser.company !== req.user.company) {
+      return res.status(403).json({ success: false, message: 'Not authorized to check out for this shift' });
+    }
+
+    const OFFICE_LOCATION = { latitude: 4.1025, longitude: 9.3908 };
+    const MAX_DISTANCE = 20;
+    const distance = verifyLocation(userLocation, OFFICE_LOCATION);
+
+    if (distance > MAX_DISTANCE) {
+      return res.status(400).json({
+        success: false,
+        message: `You are ${formatDistance(distance)} away from the office. Maximum allowed distance is ${MAX_DISTANCE} meters.`
+      });
+    }
+
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
+
+    let attendance = await Attendance.findOne({
+      employeeId: shift.employeeId._id,
+      date: { $gte: today, $lt: tomorrow }
+    });
+
+    if (!attendance) {
+      return res.status(404).json({ success: false, message: 'No check-in record found for today' });
+    }
+
+    const checkOutTime = new Date();
+    attendance.checkOutTime = checkOutTime;
+    attendance.updatedAt = Date.now();
+    await attendance.save();
+
+    shift.checkOutTime = checkOutTime;
+    shift.status = 'completed';
+    await shift.save();
+
+    res.status(200).json({ success: true, message: 'Check-out successful', attendance, shift });
+  } catch (err) {
+    console.error('Check-out error:', err);
+    res.status(500).json({ success: false, message: 'Server error during check-out' });
   }
 };

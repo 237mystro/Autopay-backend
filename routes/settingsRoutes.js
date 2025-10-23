@@ -11,10 +11,10 @@ const { protect } = require('../middleware/auth');
 const router = express.Router();
 
 router.route('/')
-  .get(protect, getSettings)
+  .get(protect, getSettings) 
   .put(protect, updateSettings);
 
-router.route('/profile')
+router.route('/profile') 
   .put(protect, updateProfile);
 
 router.route('/change-password')

@@ -1,8 +1,10 @@
-const QRCode = require('qrcode');
+// backend/utils/qrcode.js (updated for messaging)
 const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
+const QRCode = require('qrcode');
 
 // Generate QR code for a shift
-const generateShiftQRCode = async (shiftId, locationId) => {
+const generateShiftQRCode = async (shiftId) => {
   try {
     // Create a unique token for this shift
     const token = crypto.randomBytes(32).toString('hex');
@@ -10,7 +12,6 @@ const generateShiftQRCode = async (shiftId, locationId) => {
     // Create QR data with shift ID and token
     const qrData = JSON.stringify({
       shiftId,
-      locationId,
       token,
       timestamp: Date.now()
     });
@@ -26,70 +27,57 @@ const generateShiftQRCode = async (shiftId, locationId) => {
     });
     
     return {
+      success: true,
       qrCode,
       token
     };
   } catch (err) {
-    throw new Error('Error generating QR code');
-  }
-};
-
-// Generate QR code for a location
-const generateLocationQRCode = async (locationId) => {
-  try {
-    // Create a unique token for this location
-    const token = crypto.randomBytes(32).toString('hex');
-    
-    // Create QR data with location ID and token
-    const qrData = JSON.stringify({
-      locationId,
-      token,
-      timestamp: Date.now()
-    });
-    
-    // Generate QR code
-    const qrCode = await QRCode.toDataURL(qrData, {
-      width: 300,
-      margin: 2,
-      color: {
-        dark: '#000000',
-        light: '#ffffff'
-      }
-    });
-    
+    console.error('QR Code generation error:', err);
     return {
-      qrCode,
-      token
+      success: false,
+      message: 'Error generating QR code'
     };
-  } catch (err) {
-    throw new Error('Error generating QR code');
   }
 };
 
 // Verify QR code data
-const verifyQRCode = (qrData, expectedShiftId) => {
+const verifyQRData = (qrDataString) => {
   try {
-    const data = JSON.parse(qrData);
+    const data = JSON.parse(qrDataString);
     
     // Check if it's for the correct shift
-    if (data.shiftId !== expectedShiftId) {
-      return { valid: false, message: 'Invalid QR code for this shift' };
+    if (!data.shiftId || !data.token || !data.timestamp) {
+      return { 
+        success: false, 
+        message: 'Invalid QR code format' 
+      };
     }
     
     // Check if it's not expired (5 minutes)
     const now = Date.now();
     if (now - data.timestamp > 5 * 60 * 1000) {
-      return { valid: false, message: 'QR code has expired' };
+      return { 
+        success: false, 
+        message: 'QR code has expired' 
+      };
     }
     
-    return { valid: true, data };
+    return { 
+      success: true, 
+        shiftId: data.shiftId,
+        token: data.token,
+        timestamp: data.timestamp
+    };
   } catch (err) {
-    return { valid: false, message: 'Invalid QR code' };
+    console.error('QR Code verification error:', err);
+    return { 
+      success: false, 
+      message: 'Invalid QR code' 
+    };
   }
 };
 
 module.exports = {
   generateShiftQRCode,
-  generateLocationQRCode,
-  verifyQRCode
+  verifyQRData
 };

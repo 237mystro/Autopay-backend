@@ -1,110 +1,94 @@
-// backend/controllers/attendanceController.js (debugged and fixed)
+// backend/controllers/attendanceController.js
 const Attendance = require('../models/Attendance');
 const Employee = require('../models/Employee');
 const Shift = require('../models/Shift');
 const User = require('../models/User');
-const crypto = require('crypto');
-const mongoose = require('mongoose');
-const { calculateDistance } = require('../utils/location');
+const { verifyLocation, formatDistance } = require('../utils/locationVerification');
 
-// Office location coordinates (default - should be configurable)
-const OFFICE_LOCATION = {
-  latitude: parseFloat(process.env.OFFICE_LATITUDE) || 8.147194,
-  longitude: parseFloat(process.env.OFFICE_LONGITUDE) || 9.285777
-};
-const MAX_DISTANCE = parseInt(process.env.MAX_CHECKIN_DISTANCE) || 20; // 20 meters
+// Company location in DMS format (4°08'49.9"N 9°17'08.8"E)
+const COMPANY_LOCATION_DMS = "4°08'49.9\"N 9°17'08.8\"E";
+const MAX_DISTANCE_METERS = 20; // 20 meters
 
-// ------------------ CHECK IN ------------------
-exports.checkIn = async (req, res, next) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-  
+// ===============================
+// @desc    Process employee check-in with QR code + location
+// @route   POST /api/v1/attendance/checkin
+// @access  Private (Employee)
+// ===============================
+exports.checkIn = async (req, res) => {
   try {
     const { qrData, userLocation } = req.body;
 
     if (!qrData || !userLocation) {
-      await session.abortTransaction();
-      session.endSession();
       return res.status(400).json({
         success: false,
         message: 'Please provide QR code data and location'
       });
     }
 
+    // Parse QR data
     let parsedQRData;
     try {
       parsedQRData = JSON.parse(qrData);
     } catch {
-      await session.abortTransaction();
-      session.endSession();
       return res.status(400).json({
         success: false,
         message: 'Invalid QR code format'
       });
     }
 
+    // Verify QR contains required fields
     if (!parsedQRData.shiftId || !parsedQRData.token) {
-      await session.abortTransaction();
-      session.endSession();
       return res.status(400).json({
         success: false,
         message: 'Invalid QR code data'
       });
     }
 
-    const shift = await Shift.findById(parsedQRData.shiftId)
-      .populate('employeeId')
-      .session(session);
-
+    // Find the shift
+    const shift = await Shift.findById(parsedQRData.shiftId).populate('employeeId');
     if (!shift) {
-      await session.abortTransaction();
-      session.endSession();
       return res.status(404).json({
         success: false,
         message: 'Shift not found'
       });
     }
 
+    // Verify QR token
     if (parsedQRData.token !== shift.qrToken) {
-      await session.abortTransaction();
-      session.endSession();
       return res.status(400).json({
         success: false,
         message: 'Invalid QR code token'
       });
     }
 
+    // Expiration check (5 min)
     const qrTimestamp = new Date(parsedQRData.timestamp);
-    const now = new Date();
-    if (now - qrTimestamp > 5 * 60 * 1000) {
-      await session.abortTransaction();
-      session.endSession();
+    if (Date.now() - qrTimestamp > 5 * 60 * 1000) {
       return res.status(400).json({
         success: false,
         message: 'QR code has expired'
       });
     }
 
-    const employeeUser = await User.findById(shift.employeeId.userId).session(session);
-    if (!employeeUser || employeeUser.company !== req.user.company) {
-      await session.abortTransaction();
-      session.endSession();
+    // Verify company match
+    const employeeUser = await User.findById(shift.employeeId.userId);
+    if (employeeUser.company !== req.user.company) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to check in for this shift'
       });
     }
 
-    const distance = calculateDistance(userLocation, OFFICE_LOCATION);
-    if (distance > MAX_DISTANCE) {
-      await session.abortTransaction();
-      session.endSession();
+    // Verify location
+    const locationResult = verifyLocation(userLocation, COMPANY_LOCATION_DMS, MAX_DISTANCE_METERS);
+    if (!locationResult.allowed) {
       return res.status(400).json({
         success: false,
-        message: `You are ${Math.round(distance)} meters away from the office. Maximum allowed distance is ${MAX_DISTANCE} meters.`
+        message: `You are ${formatDistance(locationResult.distance)} away from the office. Max allowed is ${MAX_DISTANCE_METERS}m.`
       });
     }
 
+    // Check attendance for today
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const tomorrow = new Date(today);
@@ -113,60 +97,57 @@ exports.checkIn = async (req, res, next) => {
     let attendance = await Attendance.findOne({
       employeeId: shift.employeeId._id,
       date: { $gte: today, $lt: tomorrow }
-    }).session(session);
+    });
 
     const checkInTime = new Date();
+    const shiftStart = new Date(`${shift.date.split('T')[0]}T${shift.startTime}`);
+    const status = checkInTime > shiftStart ? 'late' : 'present';
 
     if (attendance) {
+      // Update existing record
       attendance.checkInTime = checkInTime;
-      attendance.status = checkInTime > new Date(`${shift.date.split('T')[0]}T${shift.startTime}`) ? 'late' : 'present';
+      attendance.status = status;
       attendance.location = {
         type: 'Point',
         coordinates: [userLocation.longitude, userLocation.latitude]
       };
       attendance.qrData = qrData;
       attendance.updatedAt = Date.now();
-      await attendance.save({ session });
+      await attendance.save();
     } else {
-      const shiftStart = new Date(`${shift.date.split('T')[0]}T${shift.startTime}`);
-      const status = checkInTime > shiftStart ? 'late' : 'present';
-      
-      attendance = await Attendance.create([{
+      // Create new record
+      attendance = await Attendance.create({
         employeeId: shift.employeeId._id,
         shiftId: shift._id,
         date: today,
-        checkInTime: checkInTime,
-        status: status,
+        checkInTime,
+        status,
         location: {
           type: 'Point',
           coordinates: [userLocation.longitude, userLocation.latitude]
         },
-        qrData: qrData
-      }], { session });
-      
-      attendance = attendance[0];
+        qrData
+      });
     }
 
+    // Update shift status
     shift.checkInTime = checkInTime;
     shift.status = 'in-progress';
     shift.checkInLocation = {
       type: 'Point',
       coordinates: [userLocation.longitude, userLocation.latitude]
     };
-    await shift.save({ session });
-
-    await session.commitTransaction();
-    session.endSession();
+    await shift.save();
 
     res.status(200).json({
       success: true,
       message: 'Check-in successful',
-      data: { attendance, shift }
+      data: {
+        attendance,
+        shift
+      }
     });
   } catch (err) {
-    await session.abortTransaction();
-    session.endSession();
-    
     console.error('Check-in error:', err);
     res.status(500).json({
       success: false,
@@ -175,156 +156,35 @@ exports.checkIn = async (req, res, next) => {
   }
 };
 
-// ------------------ CHECK OUT ------------------
-exports.checkOut = async (req, res, next) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-  
+// ===============================
+// @desc    Get attendance records (Admin dashboard)
+// @route   GET /api/v1/attendance
+// @access  Private (Admin/HR)
+// ===============================
+exports.getAttendance = async (req, res) => {
   try {
-    const { shiftId, userLocation } = req.body;
-
-    if (!shiftId || !userLocation) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide shift ID and location'
-      });
-    }
-
-    const shift = await Shift.findById(shiftId)
-      .populate('employeeId')
-      .session(session);
-
-    if (!shift) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(404).json({
-        success: false,
-        message: 'Shift not found'
-      });
-    }
-
-    const employeeUser = await User.findById(shift.employeeId.userId).session(session);
-    if (!employeeUser || employeeUser.company !== req.user.company) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(403).json({
-        success: false,
-        message: 'Not authorized to check out for this shift'
-      });
-    }
-
-    const distance = calculateDistance(userLocation, OFFICE_LOCATION);
-    if (distance > MAX_DISTANCE) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(400).json({
-        success: false,
-        message: `You are ${Math.round(distance)} meters away from the office. Maximum allowed distance is ${MAX_DISTANCE} meters.`
-      });
-    }
-
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-
-    let attendance = await Attendance.findOne({
-      employeeId: shift.employeeId._id,
-      date: { $gte: today, $lt: tomorrow }
-    }).session(session);
-
-    if (!attendance) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(404).json({
-        success: false,
-        message: 'No check-in record found for today'
-      });
-    }
-
-    const checkOutTime = new Date();
-
-    attendance.checkOutTime = checkOutTime;
-    attendance.updatedAt = Date.now();
-    await attendance.save({ session });
-
-    shift.checkOutTime = checkOutTime;
-    shift.status = 'completed';
-    await shift.save({ session });
-
-    await session.commitTransaction();
-    session.endSession();
-
-    res.status(200).json({
-      success: true,
-      message: 'Check-out successful',
-      data: { attendance, shift }
-    });
-  } catch (err) {
-    await session.abortTransaction();
-    session.endSession();
-    
-    console.error('Check-out error:', err);
-    res.status(500).json({
-      success: false,
-      message: 'Server error during check-out'
-    });
-  }
-};
-
-// ------------------ GET ATTENDANCE ------------------
-exports.getAttendance = async (req, res, next) => {
-  try {
-    const employee = await Employee.findOne({ userId: req.user.id });
-
-    if (!employee) {
-      return res.status(404).json({
-        success: false,
-        message: 'Employee record not found'
-      });
-    }
-
-    const attendance = await Attendance.find({ employeeId: employee._id })
-      .sort({ date: -1 })
-      .limit(30);
-
-    res.status(200).json({
-      success: true,
-      count: attendance.length,
-      data: attendance
-    });
-  } catch (err) {
-    console.error('Get attendance error:', err);
-    res.status(500).json({
-      success: false,
-      message: 'Server error while fetching attendance records'
-    });
-  }
-};
-
-// ------------------ ADMIN DASHBOARD ------------------
-exports.getAdminAttendanceDashboard = async (req, res, next) => {
-  try {
+    // Get employees for same company
     const employees = await Employee.find({ 
       userId: { $in: await User.find({ company: req.user.company }).distinct('_id') }
     });
 
     const employeeIds = employees.map(emp => emp._id);
 
+    // Today range
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
 
+    // Attendance records
     const todaysAttendance = await Attendance.find({ 
       employeeId: { $in: employeeIds },
       date: { $gte: today, $lt: tomorrow }
     }).populate('employeeId', 'name position');
 
-    const presentCount = todaysAttendance.filter(att => att.status === 'present').length;
-    const lateCount = todaysAttendance.filter(att => att.status === 'late').length;
+    // Summary
+    const presentCount = todaysAttendance.filter(a => a.status === 'present').length;
+    const lateCount = todaysAttendance.filter(a => a.status === 'late').length;
     const absentCount = employees.length - presentCount - lateCount;
 
     res.status(200).json({
@@ -342,66 +202,6 @@ exports.getAdminAttendanceDashboard = async (req, res, next) => {
     res.status(500).json({
       success: false,
       message: 'Server error while fetching attendance dashboard'
-    });
-  }
-};
-
-// ------------------ GENERATE QR ------------------
-exports.generateQRCode = async (req, res, next) => {
-  try {
-    const { shiftId } = req.body;
-
-    if (!shiftId) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide shift ID'
-      });
-    }
-
-    const shift = await Shift.findById(shiftId).populate('employeeId');
-
-    if (!shift) {
-      return res.status(404).json({
-        success: false,
-        message: 'Shift not found'
-      });
-    }
-
-    const employeeUser = await User.findById(shift.employeeId.userId);
-    if (employeeUser.company !== req.user.company) {
-      return res.status(403).json({
-        success: false,
-        message: 'Not authorized to generate QR code for this shift'
-      });
-    }
-
-    const token = crypto.randomBytes(32).toString('hex');
-    const timestamp = Date.now();
-
-    shift.qrToken = token;
-    shift.qrGeneratedAt = timestamp;
-    await shift.save();
-
-    const qrData = JSON.stringify({
-      shiftId: shift._id,
-      token,
-      timestamp
-    });
-
-    res.status(200).json({
-      success: true,
-      message: 'QR code generated successfully',
-      data: {
-        qrData,
-        shiftId: shift._id,
-        expiresAt: new Date(timestamp + 5 * 60 * 1000)
-      }
-    });
-  } catch (err) {
-    console.error('Generate QR code error:', err);
-    res.status(500).json({
-      success: false,
-      message: 'Server error while generating QR code'
     });
   }
 };
