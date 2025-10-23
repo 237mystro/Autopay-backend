@@ -9,6 +9,7 @@ const connectDB = require('./config/db');
 const errorHandler = require('./middleware/error');
 const { initializeSocket } = require('./socket');
 const http = require('http');
+const { Server } = require('socket.io');
 const path = require('path');
 
 // Load env vars
